@@ -1,0 +1,4 @@
+numpy
+sentence-transformers
+google-genai      # only if you use Gemini
+anthropic         # only if you use Claude
