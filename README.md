@@ -24,8 +24,6 @@ python rag.py "How do we detect duplicate leads?"
 python rag.py                          # interactive mode
 ```
 
-  ![Example output](Screenshot%202026-11-11%20170549.png)
-
 Model names can be changed with `GEMINI_MODEL` or `ANTHROPIC_MODEL` if a default is retired.
 
 ## Example questions

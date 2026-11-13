@@ -1,5 +1,5 @@
 gradio
 numpy
-sentence-transformers
+scikit-learn
 google-genai
 anthropic
