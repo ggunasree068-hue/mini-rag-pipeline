@@ -1,5 +1,5 @@
 gradio
 numpy
 scikit-learn
+requests
 google-genai
-anthropic
