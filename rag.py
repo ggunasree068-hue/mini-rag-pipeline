@@ -1,66 +1,66 @@
-"""Small RAG (Retrieval-Augmented Generation) demo.
 
-Pipeline: load documents -> split into chunks -> embed chunks -> retrieve the
-most similar chunks for a question -> send them to an LLM as context.
+"""Mini RAG pipeline using TF-IDF and Ollama Llama 3.2."""
 
-Usage:
-    python rag.py "How do we detect duplicate leads?"
-    python rag.py            # interactive mode
-"""
-
-"""Mini RAG pipeline using TF-IDF and Gemini."""
-
-import os
 import sys
 from pathlib import Path
 
 import numpy as np
+import requests
 from sklearn.feature_extraction.text import TfidfVectorizer
 
 
-# Folder containing text documents
 DATA_DIR = Path(__file__).parent / "data"
 
-# RAG settings
 CHUNK_SIZE = 60
 CHUNK_OVERLAP = 15
 TOP_K = 3
 
+# Adjust this threshold after testing your documents.
+SIMILARITY_THRESHOLD = 0.13
+
+OLLAMA_URL = "http://localhost:11434/api/generate"
+OLLAMA_MODEL = "llama3.2"
+
 
 def load_documents(folder=DATA_DIR):
-    """Load all .txt and .md files from the data folder."""
+    """Load all text and Markdown documents."""
 
     docs = []
 
     for path in sorted(Path(folder).glob("*")):
         if path.suffix.lower() in {".txt", ".md"}:
-            docs.append((path.name, path.read_text(encoding="utf-8")))
+            docs.append(
+                (path.name, path.read_text(encoding="utf-8"))
+            )
 
     return docs
 
 
 def chunk_text(text, size=CHUNK_SIZE, overlap=CHUNK_OVERLAP):
-    """Split document text into smaller overlapping chunks."""
+    """Split documents into overlapping chunks."""
 
     words = text.split()
     step = max(size - overlap, 1)
 
     chunks = []
+    start = 0
 
-    for start in range(0, len(words), step):
+    while start < len(words):
         piece = words[start:start + size]
 
         if piece:
             chunks.append(" ".join(piece))
 
         if start + size >= len(words):
-            break
+            start = len(words)
+        else:
+            start += step
 
     return chunks
 
 
 def build_index(docs):
-    """Convert document chunks into TF-IDF vectors."""
+    """Create TF-IDF vectors from document chunks."""
 
     chunks = []
 
@@ -72,131 +72,166 @@ def build_index(docs):
             })
 
     if not chunks:
-        raise ValueError("No text chunks found in the documents.")
+        raise ValueError("No text chunks found.")
 
     vectorizer = TfidfVectorizer()
 
     vectors = vectorizer.fit_transform(
-        [c["text"] for c in chunks]
+        [chunk["text"] for chunk in chunks]
     )
 
     return vectorizer, chunks, vectors
 
 
 def retrieve(question, vectorizer, chunks, vectors, k=TOP_K):
-    """Find the most relevant document chunks using TF-IDF."""
+    """Retrieve the most relevant document chunks."""
 
-    q = vectorizer.transform([question])
+    question_vector = vectorizer.transform([question])
 
-    scores = (vectors @ q.T).toarray().flatten()
+    scores = (
+        vectors @ question_vector.T
+    ).toarray().flatten()
 
     best = np.argsort(scores)[::-1][:k]
 
-    return [(chunks[i], float(scores[i])) for i in best]
+    return [
+        (chunks[i], float(scores[i]))
+        for i in best
+    ]
 
 
 def build_prompt(question, hits):
-    """Create a prompt using retrieved document chunks."""
+    """Build a prompt using retrieved CRM context."""
 
     context = "\n\n".join(
-        f"[{c['source']}] {c['text']}" for c, _ in hits
+        f"[{chunk['source']}] {chunk['text']}"
+        for chunk, score in hits
     )
 
     return (
-        "Answer the question using ONLY the context below. "
-        "If the answer is not in the context, say you don't know.\n\n"
-        f"Context:\n{context}\n\n"
-        f"Question: {question}\nAnswer:"
+        "You are a helpful CRM assistant. "
+        "Answer using only the provided CRM context. "
+        "Do not invent CRM details. "
+        "If the information is missing, say so.\n\n"
+        f"CRM Context:\n{context}\n\n"
+        f"Question: {question}\n"
+        "Answer:"
     )
 
 
+def build_general_prompt(question):
+    """Build a prompt for general questions."""
+
+    return (
+        "You are a helpful general-purpose AI assistant. "
+        "Answer the user's question clearly and accurately. "
+        "Use simple language and examples when helpful.\n\n"
+        f"Question: {question}\n"
+        "Answer:"
+    )
+
 
 def generate(prompt):
-    """Generate an answer using Gemini or Claude."""
+    """Generate an answer using Llama 3.2 through Ollama."""
 
-    if os.getenv("GEMINI_API_KEY"):
-        try:
-            from google import genai
+    try:
+        print(
+            "\nConnecting to Ollama (Llama 3.2)...",
+            flush=True
+        )
 
-            print("\nConnecting to Gemini...")
+        response = requests.post(
+            OLLAMA_URL,
+            json={
+                "model": OLLAMA_MODEL,
+                "prompt": prompt,
+                "stream": False
+            },
+            timeout=180
+        )
 
-            client = genai.Client(
-                api_key=os.getenv("GEMINI_API_KEY")
-            )
+        response.raise_for_status()
 
-            model = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
+        result = response.json()
+        answer_text = result.get("response", "").strip()
 
-            response = client.models.generate_content(
-                model=model,
-                contents=prompt
-            )
-
-            print("Gemini response received.")
-
-            if response.text:
-                return response.text
-
-            return "Gemini returned an empty response."
-
-        except Exception as e:
-            print(f"\nGemini error: {e}")
+        if not answer_text:
+            print("Ollama returned an empty response.")
             return None
 
-    if os.getenv("ANTHROPIC_API_KEY"):
-        try:
-            import anthropic
+        print("Llama response received!")
 
-            client = anthropic.Anthropic()
-            model = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-5-5")
+        return answer_text
 
-            msg = client.messages.create(
-                model=model,
-                max_tokens=500,
-                messages=[{"role": "user", "content": prompt}]
-            )
+    except requests.exceptions.RequestException as error:
+        print(f"\nOllama connection error: {error}")
+        return None
 
-            return msg.content[0].text
-
-        except Exception as e:
-            print(f"\nClaude error: {e}")
-            return None
-
-    return None
-
+    except (ValueError, KeyError) as error:
+        print(f"\nOllama response error: {error}")
+        return None
 
 
 def answer(question, vectorizer, chunks, vectors):
-    """Retrieve relevant chunks and generate an answer."""
+    """Answer CRM and general questions using two modes."""
 
-    hits = retrieve(question, vectorizer, chunks, vectors)
+    hits = retrieve(
+        question,
+        vectorizer,
+        chunks,
+        vectors
+    )
 
-    print("\nRetrieved context:")
+    best_score = max(
+        (score for chunk, score in hits),
+        default=0.0
+    )
 
-    for c, score in hits:
+    print(f"\nBest similarity score: {best_score:.2f}")
+
+    if best_score >= SIMILARITY_THRESHOLD:
+
+        print("\nMode: CRM RAG")
+
+        print("\nRetrieved context:")
+
+        for chunk, score in hits:
+            print(
+                f"  ({score:.2f}) "
+                f"[{chunk['source']}] "
+                f"{chunk['text'][:90]}..."
+            )
+
+        prompt = build_prompt(question, hits)
+
+    else:
+
+        print("\nMode: General AI")
+
         print(
-            f"  ({score:.2f}) [{c['source']}] "
-            f"{c['text'][:90]}..."
+            "No sufficiently relevant CRM context found. "
+            "Using Llama's general knowledge."
         )
 
-    reply = generate(build_prompt(question, hits))
+        prompt = build_general_prompt(question)
+
+    reply = generate(prompt)
 
     if reply is None:
-        print(
-            "\nNo API key set. Showing retrieval only. "
-            "Set GEMINI_API_KEY or ANTHROPIC_API_KEY "
-            "to get a generated answer."
-        )
+        print("\nUnable to generate a response. Check Ollama.")
     else:
-        print(f"\nAnswer: {reply}")
+        print(f"\nAnswer:\n{reply}")
 
 
 def main():
-    """Load documents, build index and accept questions."""
+    """Run the complete RAG pipeline."""
 
     docs = load_documents()
 
     if not docs:
-        sys.exit(f"No .txt or .md files found in {DATA_DIR}")
+        sys.exit(
+            f"No documents found in {DATA_DIR}"
+        )
 
     vectorizer, chunks, vectors = build_index(docs)
 
@@ -205,22 +240,35 @@ def main():
         f"from {len(docs)} documents."
     )
 
-    if len(sys.argv) > 1:
+    if sys.argv[1:]:
+
+        question = " ".join(sys.argv[1:])
+
         answer(
-            " ".join(sys.argv[1:]),
+            question,
             vectorizer,
             chunks,
             vectors
         )
+
         return
 
-    while True:
-        q = input("\nAsk a question (or 'quit'): ").strip()
+    question = input(
+        "\nAsk a question (or 'quit'): "
+    ).strip()
 
-        if q.lower() in {"quit", "exit", ""}:
-            break
+    while question.lower() not in {"quit", "exit", ""}:
 
-        answer(q, vectorizer, chunks, vectors)
+        answer(
+            question,
+            vectorizer,
+            chunks,
+            vectors
+        )
+
+        question = input(
+            "\nAsk a question (or 'quit'): "
+        ).strip()
 
 
 if __name__ == "__main__":
